@@ -1,0 +1,17 @@
+# JAX: install a build that matches your machine (CPU / CUDA / Metal).
+# See https://jax.readthedocs.io/en/latest/installation.html
+jax>=0.4.28
+flax>=0.10.0
+optax>=0.2.2
+
+# Data & tokenization
+datasets>=2.18.0
+tiktoken>=0.5.0
+numpy>=1.26.0,<3
+tqdm>=4.65.0
+
+# basic_gpt_jax.py (Grain dataloader)
+grain>=0.2.0
+
+# gpt_improved.py (checkpoints)
+orbax-checkpoint>=0.5.0
