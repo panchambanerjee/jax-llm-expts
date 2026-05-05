@@ -1,0 +1,131 @@
+================================================================================
+  JAX LLM Experiments — Improvements and Changes (summary)
+================================================================================
+Date context: This document describes what was added or changed in the repo
+as part of the modular training / checkpoint / sharing work, and how it
+relates to the original `gpt_improved.py` training script.
+
+--------------------------------------------------------------------------------
+1. What stayed the same
+--------------------------------------------------------------------------------
+
+- `basic_gpt_jax.py` — Unchanged (minimal tutorial-style script).
+- `gpt_improved.py` — Kept as the **original, self-contained** training script
+  (all model code, data tokenization, training loop, and Orbax I/O in one
+  file). It uses **per-story** fixed-length rows: each story is tokenized,
+  then padded or truncated to `MAX_LEN` with `PAD_TOKEN` (50256), so many
+  positions in a row can be padding.
+- `README.md` — Not rewritten for the new files; it still documents
+  `gpt_improved.py` as the main “improved” trainer.
+
+--------------------------------------------------------------------------------
+2. New files (modular layer)
+--------------------------------------------------------------------------------
+
+`model.py`
+  - Extracted `TokenAndPositionEmbedding`, `TransformerBlock`, and `MiniGPT`
+    (same architecture as in `gpt_improved.py`: pre-norm, MHA+FFN, final LN,
+    weight-tied logits).
+  - `load_model_config(path)` and `create_model_from_config(...)` to build a
+    model from a JSON config (e.g. `model_config.json` next to a run).
+  - `generate_text(...)` for sampling (temperature, top-k, repetition penalty;
+    optional `pad_token` and PRNG key).
+
+`checkpoint_utils.py`
+  - **Save:** `save_model_weights` / `save_training_checkpoint` using
+    `orbax.checkpoint.PyTreeCheckpointer` (Flax NNX `nnx.state` PyTrees).
+  - **Restore:** `restore_model_weights` and `restore_training_checkpoint`
+    with explicit `ArrayRestoreArgs` and `SingleDeviceSharding` so checkpoints
+    can be loaded on CPU or a single GPU without the “sharding is None”
+    restore errors that show up when moving checkpoints off the training
+    device.
+  - Helpers: `build_restore_args`, `target_sharding_for_device`.
+
+`train_common.py`
+  - `FastDataLoader` — same idea as the class that lived in `gpt_improved.py`
+    (NumPy shuffle + batching).
+  - `pack_texts_to_sequences(...)` — **packed** training data: concatenate
+    stories with an EOS token after each story, then slice into non-overlapping
+    chunks of length `MAX_LEN`. Reduces wasted compute on padding compared to
+    padding each story to full length (except possibly the last incomplete chunk,
+    which is padded if the corpus is very short).
+  - `prepare_batch`, `make_train_step`, `make_eval_step`, `apply_gradients`,
+    `evaluate_batches`, masked cross-entropy / BPB (aligned with the original
+    loss masking using `PAD_TOKEN`).
+  - `get_gpt2_tokenizer()` — central tiktoken GPT-2 encoding accessor.
+
+`gpt_improved_modular.py`
+  - **Copy** of the refactored trainer: imports `model`, `checkpoint_utils`,
+    and `train_common` instead of duplicating class definitions.
+  - Uses **packed** TinyStories train/val via `pack_texts_to_sequences`.
+  - Saves periodic **`save_training_checkpoint`** and final
+    **`save_model_weights`** through `checkpoint_utils`.
+  - Writes **`model_config.json`** with extra fields such as
+    `packed_sequences`, `train_seed` when produced by this script.
+  - Optional **`USE_BFLOAT16=1`** env var sets JAX matmul precision hint
+    (`jax_default_matmul_precision=bfloat16`). This is a light knob, not full
+    automatic mixed-precision training.
+  - **`TRAIN_SEED` / `RNG_SEED`** — NumPy seed from env `TRAIN_SEED` (default 42)
+    for more reproducible shuffling.
+
+Run the modular trainer with:
+  python gpt_improved_modular.py
+
+Run the classic trainer with:
+  python gpt_improved.py
+
+--------------------------------------------------------------------------------
+3. Behavioral differences: classic vs modular
+--------------------------------------------------------------------------------
+
+Data layout
+  - `gpt_improved.py`: One row per story, length `MAX_LEN`, padded with
+    `PAD_TOKEN` after content — loss is masked on pad positions.
+  - `gpt_improved_modular.py`: Streams token IDs across stories, slices into
+    `MAX_LEN` chunks — typically **fewer pad tokens** per training token.
+
+Checkpoints
+  - `gpt_improved.py`: Uses Orbax directly (`ocp.PyTreeCheckpointer`) for
+    training bundles and `final_model.orbax` for weights only.
+  - `gpt_improved_modular.py`: Same logical artifacts but routed through
+    `checkpoint_utils` for consistent save paths and **restore** helpers for
+    downstream scripts.
+
+Run directory naming
+  - Classic script uses a run id like `run_5090_<timestamp>` (hardware-specific
+    label in the historical version).
+  - Modular script uses `run_<timestamp>`.
+
+--------------------------------------------------------------------------------
+4. Plan / roadmap items not present as separate scripts yet
+--------------------------------------------------------------------------------
+
+The following were discussed in the broader plan but are **not** in this repo
+as standalone entrypoints at the time of this document:
+
+  - `eval_lm.py` — Full-val / WikiText-style BPB-PPL JSON reports.
+  - `fine_tune.py` — Load checkpoint + fresh optimizer + continued training.
+  - Hugging Face export (`safetensors`, Hub upload, Gradio demo).
+
+When those are added, they should call `restore_model_weights` from
+`checkpoint_utils.py` and build `MiniGPT` via `model.py` + `model_config.json`.
+
+--------------------------------------------------------------------------------
+5. Dependencies
+--------------------------------------------------------------------------------
+
+`requirements.txt` is unchanged at the time of this summary (JAX, Flax, Optax,
+datasets, tiktoken, tqdm, grain, orbax-checkpoint). Optional tooling for Hub
+export or Gradio would add packages when those scripts exist.
+
+--------------------------------------------------------------------------------
+6. Notebooks
+--------------------------------------------------------------------------------
+
+`test_model.ipynb` may still show older Orbax restore patterns; prefer using
+`checkpoint_utils.restore_model_weights(...)` when loading `final_model.orbax`
+with a template model built from `model_config.json`.
+
+================================================================================
+End of document
+================================================================================

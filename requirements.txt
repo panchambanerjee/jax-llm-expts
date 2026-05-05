@@ -15,3 +15,4 @@ grain>=0.2.0
 
 # gpt_improved.py (checkpoints)
 orbax-checkpoint>=0.5.0
+wandb>=0.17.0

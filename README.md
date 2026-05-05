@@ -9,7 +9,9 @@ The basic architecture is taken from this course: [Build and Train an LLM with J
 | File | Purpose |
 |------|---------|
 | [`basic_gpt_jax.py`](basic_gpt_jax.py) | Minimal training loop: tiny model, Grain dataloader, attention-only blocks (FFN and layer norm left commented as learning hooks). |
-| [`gpt_improved.py`](gpt_improved.py) | Full small-GPT-style setup: larger model, pre-tokenized data, masked loss, validation, sampling, gradient accumulation, checkpoints, and weight-tied LM head. |
+| [`gpt_improved.py`](gpt_improved.py) | Full small-GPT-style setup: larger model, pre-tokenized data, masked loss, validation, sampling, gradient accumulation, checkpoints, and weight-tied LM head. Optional early stopping. |
+| [`gpt_improved_modular.py`](gpt_improved_modular.py) | Modular trainer using shared `model.py`, `checkpoint_utils.py`, and `train_common.py`; supports packed sequences, optional W&B telemetry, and optional early stopping. |
+| [`eval_lm.py`](eval_lm.py) | Evaluation harness for saved checkpoints; reports CE/PPL/BPB on TinyStories + WikiText-2 and writes a JSON report. |
 
 ## What `basic_gpt_jax.py` does
 
@@ -253,6 +255,7 @@ From the repo root, install dependencies (pick a [JAX build](https://jax.readthe
 pip install -r requirements.txt
 python basic_gpt_jax.py
 python gpt_improved.py
+python gpt_improved_modular.py
 ```
 
 `gpt_improved.py` expects more RAM/GPU memory and disk (dataset cache, larger arrays, checkpoints).
@@ -263,8 +266,56 @@ python gpt_improved.py
 
 ```bash
 pip install -U "jax[cuda12]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-pip install flax optax grain datasets tiktoken orbax-checkpoint tqdm matplotlib seaborn gradio transformers
+pip install flax optax grain datasets tiktoken orbax-checkpoint tqdm matplotlib seaborn gradio transformers wandb
 ```
+
+### Telemetry (Weights & Biases)
+
+`gpt_improved_modular.py` supports optional W&B logging.
+
+```bash
+export ENABLE_WANDB=1
+export WANDB_PROJECT=jax-llm-expts
+# optional:
+# export WANDB_ENTITY=your_team_or_username
+
+python gpt_improved_modular.py
+```
+
+Logged metrics include train/val loss, BPB, learning rate, throughput, and generated samples.
+
+### Early stopping
+
+Both [`gpt_improved.py`](gpt_improved.py) and [`gpt_improved_modular.py`](gpt_improved_modular.py) support optional **early stopping** on validation **BPB** (bits per byte; lower is better). When validation improves, weights are written to `runs/<run_id>/best_model.orbax`. `final_model.orbax` is always the **last** step; use `best_model.orbax` for the best validation checkpoint when early stopping ran.
+
+```bash
+# Stop after 5 consecutive evaluations with no val BPB improvement
+export EARLY_STOP_PATIENCE=5
+# Optional: require improvement by at least this much (default 0)
+export EARLY_STOP_MIN_DELTA=0.0
+```
+
+Set `EARLY_STOP_PATIENCE=0` (default) to disable.
+
+### Evaluation harness
+
+Run evaluation on a saved checkpoint + config:
+
+```bash
+python eval_lm.py \
+  --checkpoint runs/<run_id>/final_model.orbax \
+  --config runs/<run_id>/model_config.json \
+  --output runs/<run_id>/eval_report.json
+```
+
+The script evaluates:
+- TinyStories validation (in-domain)
+- WikiText-2 test (cross-domain)
+
+And reports:
+- cross-entropy (nats/token)
+- perplexity
+- bits-per-byte (BPB)
 
 Confirm JAX is using the GPU: `jax.devices()[0].platform` should show **`gpu`**.
 

@@ -55,6 +55,9 @@ SAVE_EVERY = 2000
 
 PAD_TOKEN = 50256
 
+EARLY_STOP_PATIENCE = int(os.environ.get("EARLY_STOP_PATIENCE", "0"))
+EARLY_STOP_MIN_DELTA = float(os.environ.get("EARLY_STOP_MIN_DELTA", "0.0"))
+
 # ==========================================
 # 2. FAST DATA LOADING
 # ==========================================
@@ -329,8 +332,18 @@ def train():
     print(f"  Batch: {BATCH_SIZE} × {GRADIENT_ACCUMULATION_STEPS} = {BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS}")
     print(f"  Tokens/step: {BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * MAX_LEN:,}")
     print(f"  Total steps: {TOTAL_STEPS:,}")
+    if EARLY_STOP_PATIENCE > 0:
+        print(
+            f"  Early stopping: patience={EARLY_STOP_PATIENCE} evals, "
+            f"min_delta={EARLY_STOP_MIN_DELTA} (val BPB)"
+        )
     print(f"  Run: {run_dir}")
     print(f"{'='*80}\n")
+    
+    best_val_bpb = float('inf')
+    best_step = None
+    evals_without_improve = 0
+    stop_training = False
     
     # Training
     step = 0
@@ -345,8 +358,10 @@ def train():
     
     with tqdm(total=TOTAL_STEPS, desc="Training", ncols=100) as pbar:
         for epoch in range(NUM_EPOCHS):
+            if stop_training:
+                break
             for batch in train_loader:
-                if step >= TOTAL_STEPS:
+                if step >= TOTAL_STEPS or stop_training:
                     break
                 
                 step_start = time.time()
@@ -401,6 +416,29 @@ def train():
                         metrics_history['steps'].append(step + 1)
                         
                         print(f"\nStep {step+1} | Train: {metrics_history['train_loss'][-1]:.4f} | Val: {val_loss:.4f}")
+
+                        if EARLY_STOP_PATIENCE > 0:
+                            if val_bpb < best_val_bpb - EARLY_STOP_MIN_DELTA:
+                                best_val_bpb = val_bpb
+                                best_step = step + 1
+                                evals_without_improve = 0
+                                chk = ocp.PyTreeCheckpointer()
+                                chk.save(run_dir / "best_model.orbax", nnx.state(model), force=True)
+                                print(
+                                    f"  New best val BPB {best_val_bpb:.6f} at step {best_step} → saved best_model.orbax"
+                                )
+                            else:
+                                evals_without_improve += 1
+                                print(
+                                    f"  No val BPB improvement ({evals_without_improve}/{EARLY_STOP_PATIENCE})"
+                                )
+                                if evals_without_improve >= EARLY_STOP_PATIENCE:
+                                    print(
+                                        "\nEarly stopping: val BPB did not improve enough "
+                                        f"for {EARLY_STOP_PATIENCE} consecutive evaluations."
+                                    )
+                                    stop_training = True
+                                    metrics_history['early_stopped'] = True
                     
                     # RESTORED: Sample generation during training
                     if (step + 1) % SAMPLE_EVERY == 0:
@@ -442,6 +480,8 @@ def train():
                     
                     step += 1
                     pbar.update(1)
+                    if stop_training:
+                        break
     
     # Training complete
     total_time = time.time() - step_start
@@ -458,6 +498,14 @@ def train():
     avg_throughput = sum(metrics_history['tokens_per_sec']) / len(metrics_history['tokens_per_sec'])
     print(f"  Avg Throughput: {avg_throughput:,.0f} tokens/sec")
     print(f"  Checkpoints: {run_dir}")
+    if best_step is not None:
+        print(
+            f"  Best val BPB: {best_val_bpb:.6f} at step {best_step} (see best_model.orbax)"
+        )
+    if metrics_history.get('early_stopped'):
+        print(
+            "  Note: in-memory weights are from the last step; use best_model.orbax for the best val checkpoint."
+        )
     print(f"{'='*80}\n")
     
     # RESTORED: Save final model with config
@@ -479,7 +527,11 @@ def train():
         'gpu': 'RTX_5090',
         'batch_size': BATCH_SIZE,
         'grad_accum_steps': GRADIENT_ACCUMULATION_STEPS,
-        'effective_batch_size': BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
+        'effective_batch_size': BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS,
+        'early_stop_patience': EARLY_STOP_PATIENCE,
+        'early_stop_min_delta': EARLY_STOP_MIN_DELTA,
+        'best_val_bpb': best_val_bpb if best_step is not None else None,
+        'best_step': best_step,
     }
     with open(run_dir / "model_config.json", "w") as f:
         json.dump(config, f, indent=2)
